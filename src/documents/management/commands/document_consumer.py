@@ -37,6 +37,9 @@ def _tags_from_path(filepath):
 
 
 def _consume(filepath):
+    if os.path.isdir(filepath):
+        return
+
     if not os.path.isfile(filepath):
         logger.debug(
             f"Not consuming file {filepath}: File has moved.")
@@ -53,7 +56,7 @@ def _consume(filepath):
     try:
         async_task("documents.tasks.consume_file",
                    filepath,
-                   override_tag_ids=tag_ids if tag_ids else None,
+                   override_tag_ids=tag_ids,
                    task_name=os.path.basename(filepath)[:100])
     except Exception as e:
         # Catch all so that the consumer won't crash.
@@ -181,7 +184,11 @@ class Command(BaseCommand):
 
         try:
             while not self.stop_flag:
-                for event in inotify.read(timeout=1000):
+                # read-delay is here for a reason: some scanners like to put
+                # files into temporary files while they write them, and then
+                # move them to their final file name. This catches that
+                # case.
+                for event in inotify.read(timeout=1000, read_delay=1000):
                     if recursive:
                         path = inotify.get_path(event.wd)
                     else:

@@ -34,12 +34,12 @@ def chunked(size, source):
         yield source[i:i+size]
 
 
-class TestConsumer(DirectoriesMixin, TransactionTestCase):
+class TestConsumerBase(DirectoriesMixin, TransactionTestCase):
 
     sample_file = os.path.join(os.path.dirname(__file__), "samples", "simple.pdf")
 
     def setUp(self) -> None:
-        super(TestConsumer, self).setUp()
+        super(TestConsumerBase, self).setUp()
         self.t = None
         patcher = mock.patch("documents.management.commands.document_consumer.async_task")
         self.task_mock = patcher.start()
@@ -58,7 +58,7 @@ class TestConsumer(DirectoriesMixin, TransactionTestCase):
             # wait for the consumer to exit.
             self.t.join()
 
-        super(TestConsumer, self).tearDown()
+        super(TestConsumerBase, self).tearDown()
 
     def wait_for_task_mock_call(self):
         n = 0
@@ -69,7 +69,6 @@ class TestConsumer(DirectoriesMixin, TransactionTestCase):
                 return
             n += 1
             sleep(0.1)
-        self.fail("async_task was never called")
 
     # A bogus async_task that will simply check the file for
     # completeness and raise an exception otherwise.
@@ -96,6 +95,9 @@ class TestConsumer(DirectoriesMixin, TransactionTestCase):
                 sleep(0.1)
             print("file completed.")
 
+
+class TestConsumer(TestConsumerBase):
+
     def test_consume_file(self):
         self.t_start()
 
@@ -109,10 +111,6 @@ class TestConsumer(DirectoriesMixin, TransactionTestCase):
         args, kwargs = self.task_mock.call_args
         self.assertEqual(args[1], f)
 
-    @override_settings(CONSUMER_POLLING=1)
-    def test_consume_file_polling(self):
-        self.test_consume_file()
-
     def test_consume_existing_file(self):
         f = os.path.join(self.dirs.consumption_dir, "my_file.pdf")
         shutil.copy(self.sample_file, f)
@@ -122,40 +120,6 @@ class TestConsumer(DirectoriesMixin, TransactionTestCase):
 
         args, kwargs = self.task_mock.call_args
         self.assertEqual(args[1], f)
-
-    @override_settings(CONSUMER_POLLING=1)
-    def test_consume_existing_file_polling(self):
-        self.test_consume_existing_file()
-
-    @override_settings(CONSUMER_RECURSIVE=1)
-    @override_settings(CONSUMER_SUBDIRS_AS_TAGS=1)
-    def test_consume_file_with_path_tags(self):
-
-        tag_names = ("existingTag", "Space Tag")
-        # Create a Tag prior to consuming a file using it in path
-        tag_ids = [Tag.objects.create(name=tag_names[0]).pk,]
-
-        self.t_start()
-
-        path = os.path.join(self.dirs.consumption_dir, *tag_names)
-        os.makedirs(path, exist_ok=True)
-        f = os.path.join(path, "my_file.pdf")
-        shutil.copy(self.sample_file, f)
-
-        self.wait_for_task_mock_call()
-
-        self.task_mock.assert_called_once()
-
-        # Add the pk of the Tag created by _consume()
-        tag_ids.append(Tag.objects.get(name=tag_names[1]).pk)
-
-        args, kwargs = self.task_mock.call_args
-        self.assertEqual(args[1], f)
-
-        # assertCountEqual has a bad name, but test that the first
-        # sequence contains the same elements as second, regardless of
-        # their order.
-        self.assertCountEqual(kwargs["override_tag_ids"], tag_ids)
 
     @mock.patch("documents.management.commands.document_consumer.logger.error")
     def test_slow_write_pdf(self, error_logger):
@@ -176,10 +140,6 @@ class TestConsumer(DirectoriesMixin, TransactionTestCase):
 
         args, kwargs = self.task_mock.call_args
         self.assertEqual(args[1], fname)
-
-    @override_settings(CONSUMER_POLLING=1)
-    def test_slow_write_pdf_polling(self):
-        self.test_slow_write_pdf()
 
     @mock.patch("documents.management.commands.document_consumer.logger.error")
     def test_slow_write_and_move(self, error_logger):
@@ -203,10 +163,6 @@ class TestConsumer(DirectoriesMixin, TransactionTestCase):
 
         error_logger.assert_not_called()
 
-    @override_settings(CONSUMER_POLLING=1)
-    def test_slow_write_and_move_polling(self):
-        self.test_slow_write_and_move()
-
     @mock.patch("documents.management.commands.document_consumer.logger.error")
     def test_slow_write_incomplete(self, error_logger):
 
@@ -226,10 +182,6 @@ class TestConsumer(DirectoriesMixin, TransactionTestCase):
         # assert that we have an error logged with this invalid file.
         error_logger.assert_called_once()
 
-    @override_settings(CONSUMER_POLLING=1)
-    def test_slow_write_incomplete_polling(self):
-        self.test_slow_write_incomplete()
-
     @override_settings(CONSUMPTION_DIR="does_not_exist")
     def test_consumption_directory_invalid(self):
 
@@ -239,3 +191,95 @@ class TestConsumer(DirectoriesMixin, TransactionTestCase):
     def test_consumption_directory_unset(self):
 
         self.assertRaises(CommandError, call_command, 'document_consumer', '--oneshot')
+
+
+@override_settings(CONSUMER_POLLING=1)
+class TestPollingConsumer(TestConsumer):
+    pass
+
+
+@override_settings(CONSUMER_RECURSIVE=1)
+class TestRecursiveConsumer(TestConsumer):
+    pass
+
+
+@override_settings(CONSUMER_RECURSIVE=1)
+@override_settings(CONSUMER_POLLING=1)
+class TestRecursivePollingConsumer(TestConsumer):
+    pass
+
+
+class TestConsumeWithTags(TestConsumerBase):
+
+    @override_settings(CONSUMER_RECURSIVE=True)
+    @override_settings(CONSUMER_SUBDIRS_AS_TAGS=True)
+    def test_consume_file_with_path_tags(self):
+
+        tag_names = ("existingTag", "Space Tag")
+        # Create a Tag prior to consuming a file using it in path
+        tag_ids = [Tag.objects.create(name=tag_names[0]).pk,]
+
+        path = os.path.join(self.dirs.consumption_dir, *tag_names)
+        os.makedirs(path, exist_ok=True)
+
+        self.t_start()
+
+        f = os.path.join(path, "my_file.pdf")
+        shutil.copy(self.sample_file, f)
+        print(f)
+
+        self.wait_for_task_mock_call()
+
+        self.task_mock.assert_called_once()
+
+        # Add the pk of the Tag created by _consume()
+        tag_ids.append(Tag.objects.get(name=tag_names[1]).pk)
+
+        args, kwargs = self.task_mock.call_args
+        self.assertEqual(args[1], f)
+
+        # assertCountEqual has a bad name, but test that the first
+        # sequence contains the same elements as second, regardless of
+        # their order.
+        self.assertCountEqual(kwargs["override_tag_ids"], tag_ids)
+
+    @override_settings(CONSUMER_RECURSIVE=True)
+    @override_settings(CONSUMER_SUBDIRS_AS_TAGS=True)
+    def test_created_after_start(self):
+
+        self.t_start()
+
+        tag_names = ("Space Tag", "existingTag")
+
+        path = os.path.join(self.dirs.consumption_dir, *tag_names)
+        os.makedirs(path, exist_ok=True)
+        sleep(2)
+        f = os.path.join(path, "my_file.pdf")
+        shutil.copy(self.sample_file, f)
+        # the consumer should notice that this directory does exist now and consume the file.
+
+        self.wait_for_task_mock_call()
+
+        self.task_mock.assert_called_once()
+
+    def test_disabled(self):
+        self.t_start()
+
+        tag_names = ("Space Tag", "existingTag")
+
+        path = os.path.join(self.dirs.consumption_dir, *tag_names)
+        os.makedirs(path, exist_ok=True)
+        # this needs to be bigger than 1000, which is the read_delay of inotify.
+        sleep(2)
+        f = os.path.join(path, "my_file.pdf")
+        shutil.copy(self.sample_file, f)
+        # the consumer should not see that a file appeared in a subfolder.
+
+        self.wait_for_task_mock_call()
+
+        self.task_mock.assert_not_called()
+
+
+@override_settings(CONSUMER_POLLING=1)
+class TestConsumeWithTagsPolling(TestConsumeWithTags):
+    pass
